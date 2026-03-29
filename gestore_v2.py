@@ -9,6 +9,7 @@ from PyPDF2 import PdfReader
 import pywhatkit as kit
 import pyautogui
 import pandas as pd
+from openpyxl.styles import PatternFill
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QPushButton, QListWidget, QMessageBox, QInputDialog, QCheckBox, QLineEdit)
@@ -23,11 +24,17 @@ CARTELLA_ARCHIVIO = r"/Users/pietro/Desktop/ArchivioOrdini"
 FILE_EXCEL = r"/Users/pietro/Desktop/ArchivioOrdini/Resoconto_Periodo.xlsx"
 FILE_CONFIG_ID = os.path.join(CARTELLA_ARCHIVIO, "config_gruppo.txt")
 
-# --- REGEX ---
+# --- REGEX INTELLIGENTI CON "ANCORA" ---
 REGEX_CODICE = r"Num\.ns\.rif #:\s*(\d+)"
-REGEX_DATA = r"Data:\s*(\d{2}/\d{2}/\d{4})"
+
+# 1. CERCA LA DATA DI CONSEGNA: Trova "Data consegna", poi guarda nei successivi 150 caratteri e pesca la data
+REGEX_DATA_CONSEGNA = r"(?is)data\s+consegna.{0,150}?(\d{2}/\d{2}/\d{4})"
+
+# 2. CERCA IL PAGAMENTO: Trova "Modalità di pagamento", poi guarda nei successivi 150 caratteri e pesca il metodo
+REGEX_PAGAMENTO = r"(?is)(?:pagamento|modalit[aà]).{0,150}?(carta|contanti|pos|paypal)"
+
 REGEX_TOTALE = r"Totale:\s*([\d,]+)"
-REGEX_PAGAMENTO = r"(?i)(carta|contanti|pos|paypal)"
+# --------------------------------------
 
 class ListaDropPDF(QListWidget):
     def __init__(self):
@@ -66,7 +73,7 @@ class ListaDropPDF(QListWidget):
 class BotApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Gestore Ordini WhatsApp V2.4")
+        self.setWindowTitle("Gestore Ordini WhatsApp V2.6")
         self.setGeometry(100, 100, 500, 650)
         
         os.makedirs(CARTELLA_ARCHIVIO, exist_ok=True)
@@ -211,11 +218,22 @@ class BotApp(QMainWindow):
 
     def invia_messaggi(self, ordini):
         id_attuale = self.input_id.text().strip()
-        kit.sendwhatmsg_to_group_instantly(id_attuale, ordini[0]["Codice_Ordine"], wait_time=25, tab_close=False)
+        
+        # Prepara la stringa da inviare in base al metodo
+        messaggio_primo_ordine = ordini[0]["Codice_Ordine"]
+        if ordini[0]["Metodo_Finale"] != ordini[0]["Metodo_PDF"]:
+            messaggio_primo_ordine += f" {ordini[0]['Metodo_Finale']}"
+
+        kit.sendwhatmsg_to_group_instantly(id_attuale, messaggio_primo_ordine, wait_time=25, tab_close=False)
         if len(ordini) > 1:
             time.sleep(3) 
             for i in range(1, len(ordini)):
-                pyautogui.typewrite(ordini[i]["Codice_Ordine"])
+                # Prepara i successivi codici + eventuale modifica
+                msg = ordini[i]["Codice_Ordine"]
+                if ordini[i]["Metodo_Finale"] != ordini[i]["Metodo_PDF"]:
+                    msg += f" {ordini[i]['Metodo_Finale']}"
+                    
+                pyautogui.typewrite(msg)
                 time.sleep(1)
                 pyautogui.press('enter')    
                 time.sleep(2)               
@@ -242,12 +260,35 @@ class BotApp(QMainWindow):
                     if cod in esistenti: 
                         saltati.append(cod)
                     else:
-                        match_d = re.search(REGEX_DATA, testo)
-                        data = datetime.strptime(match_d[1], "%d/%m/%Y").strftime("%Y-%m-%d") if match_d else datetime.now().strftime("%Y-%m-%d")
+                        # --- ESTRAZIONE DATA IBRIDA (Ancora + Fallback Sicuro Anti-Crash) ---
+                        match_d = re.search(REGEX_DATA_CONSEGNA, testo)
+                        if match_d and match_d.group(1):
+                            data_str = match_d.group(1)
+                            data = datetime.strptime(data_str, "%d/%m/%Y").strftime("%Y-%m-%d")
+                        else:
+                            # Se fallisce l'ancora, cerca tutte le date e prende la più recente in ordine cronologico
+                            date_trovate = re.findall(r"\b\d{2}/\d{2}/\d{4}\b", testo)
+                            if date_trovate:
+                                date_valide = []
+                                for d_str in date_trovate:
+                                    try:
+                                        date_valide.append(datetime.strptime(d_str, "%d/%m/%Y"))
+                                    except ValueError:
+                                        pass
+                                
+                                if date_valide:
+                                    date_valide.sort()
+                                    data = date_valide[-1].strftime("%Y-%m-%d")
+                                else:
+                                    data = datetime.now().strftime("%Y-%m-%d")
+                            else:
+                                data = datetime.now().strftime("%Y-%m-%d")
+                        # --------------------------------------------------------------------
                         
                         match_t = re.search(REGEX_TOTALE, testo)
                         tot = float(match_t[1].replace(",", ".")) if match_t else 0.0
                         
+                        # --- ESTRAZIONE PAGAMENTO CON "ANCORA" ---
                         match_p = re.search(REGEX_PAGAMENTO, testo)
                         if match_p:
                             parola = match_p.group(1).lower()
@@ -258,11 +299,12 @@ class BotApp(QMainWindow):
                             else: met = "Sconosciuto"
                         else:
                             met = "Sconosciuto"
+                        # -----------------------------------------
                             
                         estratti.append({
                             "Data": data, "Codice_Ordine": cod, "Metodo_PDF": met, "Totale_PDF_€": tot,
                             "Metodo_Finale": met, "Totale_Finale_€": tot, "Uso_Scooter": "Da definire",
-                            "nome_file": os.path.basename(p), "percorso_originale": p
+                            "nome_file": os.path.basename(p), "percorso_originale": p, "Modificato": False
                         })
             except Exception as e: print(f"Errore file {os.path.basename(p)}: {e}")
         return estratti, saltati
@@ -283,11 +325,12 @@ class BotApp(QMainWindow):
                 scelta, ok = QInputDialog.getItem(self, "Seleziona Ordine", "Quale ordine ha cambiato metodo?", lista_c, 0, False)
                 if ok and scelta:
                     codice_puro = scelta.split(" ")[0]
-                    nuovo_metodo, ok2 = QInputDialog.getItem(self, "Nuovo Metodo", "Scegli il nuovo metodo:", ["Carta", "Contanti", "POS", "PayPal"], 0, False)
+                    nuovo_metodo, ok2 = QInputDialog.getItem(self, "Nuovo Metodo", "Scegli il nuovo metodo:", ["Carta", "Contanti", "POS", "PayPal", "Non pagato"], 0, False)
                     if ok2 and nuovo_metodo:
                         for o in ordini:
                             if o["Codice_Ordine"] == codice_puro:
                                 o["Metodo_Finale"] = nuovo_metodo
+                                o["Modificato"] = True
                         lista_c = [f"{o['Codice_Ordine']} ({o['Totale_Finale_€']}€ - {o['Metodo_Finale']})" for o in ordini]
             else:
                 break
@@ -303,6 +346,7 @@ class BotApp(QMainWindow):
                         for o in ordini:
                             if o["Codice_Ordine"] == codice_puro:
                                 o["Totale_Finale_€"] = nuovo_totale
+                                o["Modificato"] = True
                         lista_c = [f"{o['Codice_Ordine']} ({o['Totale_Finale_€']}€ - {o['Metodo_Finale']})" for o in ordini]
             else:
                 break
@@ -332,7 +376,7 @@ class BotApp(QMainWindow):
         df_finale.sort_values(by='Data', inplace=True)
         
         riepilogo = df_finale.pivot_table(index='Data', columns='Metodo_Finale', values='Totale_Finale_€', aggfunc='sum', fill_value=0).reset_index()
-        for col in ['Carta', 'Contanti', 'POS', 'PayPal']:
+        for col in ['Carta', 'Contanti', 'POS', 'PayPal', 'Non pagato']:
             if col not in riepilogo.columns: riepilogo[col] = 0.0
 
         colonne_pagamento = [c for c in riepilogo.columns if c != 'Data']
@@ -349,6 +393,20 @@ class BotApp(QMainWindow):
         with pd.ExcelWriter(FILE_EXCEL, engine='openpyxl') as writer:
             df_finale.to_excel(writer, sheet_name='Dati_Ordini', index=False)
             riepilogo.to_excel(writer, sheet_name='Riepilogo_Totali', index=False)
+            
+            # Formattazione
+            workbook = writer.book
+            worksheet = writer.sheets['Dati_Ordini']
+            
+            giallo_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+            
+            if 'Modificato' in df_finale.columns:
+                col_idx = df_finale.columns.get_loc('Modificato') + 1
+                for row_idx in range(2, len(df_finale) + 2):
+                    cell_val = worksheet.cell(row=row_idx, column=col_idx).value
+                    if cell_val in [True, "True", "true", 1, "1"]:
+                        for col in range(1, len(df_finale.columns) + 1):
+                            worksheet.cell(row=row_idx, column=col).fill = giallo_fill
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
