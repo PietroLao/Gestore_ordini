@@ -28,3 +28,6 @@ pip-delete-this-directory.txt
 # File di output dell'applicazione (per evitare push accidentali di dati personali)
 *.xlsx
 *.pdf
+
+# File di test e modelli
+esempi_pdf/

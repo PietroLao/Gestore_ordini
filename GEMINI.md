@@ -46,3 +46,16 @@ L'applicativo gestisce anche un modulo "Chiudi Periodo" che, onde evitare confli
 
 1. Costruito e impacchettato presumibilmente con **PyInstaller** usando `gestore_v2.spec`.
 2. Contiene `os.chdir(os.path.expanduser("~/Desktop"))` all'avvio: il programma vincola e hard-codifica l'attività ad operare rispetto la Home e la scrivania del Mac. Nessuno degli applicativi funzionerebbe o verrebbe salvato se eseguito su Windows senza le opportune conversioni dei path di sistema.
+
+## Struttura e Template dei PDF (`esempi_pdf`)
+All'interno della cartella `esempi_pdf` sono forniti modelli di riferimento per testare i diversi output e le eccezioni prodotte dalla formattazione dei documenti:
+- **spiga (1).pdf**: Mostra un ordine saldato con **POS** , e la presenza di testo nel campo *Note*. Costituisce un ottimo banco di prova per assicurarsi che i campi extra non facciano saltare il parsing per le Regex a seguire.
+- **Pala  (11).pdf**: Modello per i pagamenti finalizzati con **PayPal**.
+- **moretto (1).pdf**: Modello per i pagamenti finalizzati con **Carta**.
+- **schievinin.pdf**: Modello per i pagamenti finalizzati in **Contanti**.
+
+⚠️ **CRITICITÀ SULLE DATE:**
+Analizzando i documenti di riferimento, si nota la presenza di **due date separate**:
+1. La data del giorno in cui è stato effettuato (ricevuto) l'ordine.
+2. La data in cui è previsto il ritiro / consegna.
+Essendo attualmente in uso una Regex basilare (`REGEX_DATA = r"Data:\s*(\d{2}/\d{2}/\d{4})"`) per la catalogazione negli archivi giornalieri, occorrerà monitorare attentamente che il parser estragga la data di **consegna** corretta, qualora i prefissi sul foglio siano simili o identici. In caso di classamento in cartelle sbagliate, questa Regex andrà rinforzata discriminando le label (es. `Data ritiro:` vs `Data ordine:`).
